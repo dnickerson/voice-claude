@@ -244,6 +244,7 @@ function connect() {
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.error) {
+      if (!currentResponseEl) startExchange('[server error]');
       appendChunk(`[Error: ${msg.error}]`);
       endResponse(false);
       return;
@@ -303,7 +304,8 @@ function endResponse(timedOut) {
 }
 
 function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+           .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 // ── Speech recognition ───────────────────────────────────────────────────────
