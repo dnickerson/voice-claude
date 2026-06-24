@@ -40,7 +40,50 @@ def validate_config(config: dict) -> None:
 
 
 # ── Pane discovery ────────────────────────────────────────────────────────────
-# (added in Task 2)
+
+def match_label(pane_path: str, projects: list) -> str:
+    best_label = pane_path.rstrip("/").split("/")[-1]
+    best_len = -1
+    for proj in projects:
+        proj_path = proj["path"].rstrip("/")
+        if pane_path == proj_path or pane_path.startswith(proj_path + "/"):
+            if len(proj_path) > best_len:
+                best_len = len(proj_path)
+                best_label = proj["label"]
+    return best_label
+
+
+def parse_panes(tmux_output: str, projects: list) -> list:
+    panes = []
+    for line in tmux_output.strip().splitlines():
+        parts = line.split("|", 2)
+        if len(parts) != 3:
+            continue
+        pane_id, command, path = parts
+        panes.append({
+            "id": pane_id,
+            "command": command,
+            "path": path,
+            "label": match_label(path, projects),
+        })
+    panes.sort(key=lambda p: (0 if p["command"] == "claude" else 1, p["id"]))
+    return panes
+
+
+async def get_panes(projects: list) -> list:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "list-panes", "-a", "-F",
+            "#{session_name}:#{window_index}.#{pane_index}"
+            "|#{pane_current_command}"
+            "|#{pane_current_path}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        return parse_panes(stdout.decode(), projects)
+    except FileNotFoundError:
+        return []
 
 # ── Response capture ──────────────────────────────────────────────────────────
 # (added in Task 3)
