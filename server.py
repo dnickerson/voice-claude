@@ -129,7 +129,261 @@ async def capture_response(pane_id: str, before_count: int):
 # ── HTML UI ───────────────────────────────────────────────────────────────────
 # (added in Task 6)
 
-HTML = "<html><body>placeholder</body></html>"
+HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Voice Claude</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #111; color: #e0e0e0; }
+
+#topbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: #1e1e1e; border-bottom: 1px solid #333;
+  padding: 10px 12px; display: flex; gap: 8px; align-items: center;
+}
+#pane-select {
+  flex: 1; background: #2a2a2a; color: #e0e0e0;
+  border: 1px solid #444; border-radius: 6px;
+  padding: 8px 10px; font-size: 14px;
+}
+#refresh-btn {
+  background: #2a2a2a; color: #aaa; border: 1px solid #444;
+  border-radius: 6px; padding: 8px 12px; font-size: 16px; cursor: pointer;
+}
+#status {
+  padding: 4px 10px; border-radius: 20px;
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}
+.s-connecting { background: #333; color: #888; }
+.s-ready      { background: #14532d; color: #4ade80; }
+.s-listening  { background: #1e3a5f; color: #60a5fa; }
+.s-processing { background: #451a03; color: #fb923c; }
+.s-error      { background: #450a0a; color: #f87171; }
+
+#content {
+  padding: 70px 16px 90px;
+  min-height: 100vh;
+  touch-action: pan-y;
+}
+.exchange { margin-bottom: 28px; border-top: 1px solid #222; padding-top: 16px; }
+.you-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.you-text { font-size: 15px; color: #9ca3af; margin-bottom: 12px; font-style: italic; }
+.claude-label { font-size: 12px; color: #60a5fa; margin-bottom: 6px; }
+.claude-text { font-size: 15px; line-height: 1.65; white-space: pre-wrap; color: #e5e7eb; }
+.interim-text { font-size: 15px; color: #4b5563; font-style: italic; margin-top: 8px; }
+
+#bottombar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+  background: #1e1e1e; border-top: 1px solid #333;
+  padding: 10px 16px;
+}
+#mic-btn {
+  display: block; width: 100%; max-width: 480px; margin: 0 auto;
+  background: #1d4ed8; color: #fff; border: none; border-radius: 50px;
+  padding: 18px 32px; font-size: 17px; font-weight: 600;
+  cursor: pointer; user-select: none; -webkit-user-select: none;
+  touch-action: none;
+  transition: background 0.15s;
+}
+#mic-btn.listening  { background: #b91c1c; }
+#mic-btn:disabled   { background: #1f2937; color: #4b5563; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <select id="pane-select"><option value="">Loading panes…</option></select>
+  <button id="refresh-btn" title="Refresh panes">↻</button>
+  <span id="status" class="s-connecting">connecting</span>
+</div>
+
+<div id="content">
+  <div style="padding:16px 0; color:#4b5563; font-size:14px;">
+    Select a pane above and hold the button below to speak.
+  </div>
+</div>
+
+<div id="bottombar">
+  <button id="mic-btn" disabled>Hold to talk</button>
+</div>
+
+<script>
+const content    = document.getElementById('content');
+const paneSelect = document.getElementById('pane-select');
+const statusEl   = document.getElementById('status');
+const micBtn     = document.getElementById('mic-btn');
+
+// ── Status ──────────────────────────────────────────────────────────────────
+function setStatus(s, label) {
+  statusEl.className = `s-${s}`;
+  statusEl.textContent = label || s;
+}
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+let ws, currentResponseEl, currentResponse = '';
+
+function connect() {
+  setStatus('connecting');
+  micBtn.disabled = true;
+  ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    setStatus('ready');
+    micBtn.disabled = false;
+    loadPanes();
+  };
+  ws.onclose = () => {
+    setStatus('error', 'disconnected');
+    micBtn.disabled = true;
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => setStatus('error');
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.error) {
+      appendChunk(`[Error: ${msg.error}]`);
+      endResponse(false);
+      return;
+    }
+    if (msg.chunk) appendChunk(msg.chunk);
+    if (msg.done)  endResponse(msg.timeout || false);
+  };
+}
+
+// ── Pane picker ──────────────────────────────────────────────────────────────
+async function loadPanes() {
+  try {
+    const r = await fetch('/panes');
+    const panes = await r.json();
+    if (!panes.length) {
+      paneSelect.innerHTML = '<option value="">No panes found — start tmux + claude</option>';
+      return;
+    }
+    paneSelect.innerHTML = panes.map(p =>
+      `<option value="${p.id}">[${p.label}] ${p.id} · ${p.command}</option>`
+    ).join('');
+  } catch {
+    paneSelect.innerHTML = '<option value="">Error loading panes</option>';
+  }
+}
+document.getElementById('refresh-btn').onclick = loadPanes;
+
+// ── Content ──────────────────────────────────────────────────────────────────
+function startExchange(text) {
+  currentResponse = '';
+  const ex = document.createElement('div');
+  ex.className = 'exchange';
+  ex.innerHTML = `
+    <div class="you-label">You said</div>
+    <div class="you-text">${escHtml(text)}</div>
+    <div class="claude-label">Claude</div>
+    <div class="claude-text"></div>
+  `;
+  content.appendChild(ex);
+  currentResponseEl = ex.querySelector('.claude-text');
+}
+
+function appendChunk(chunk) {
+  currentResponse += chunk;
+  currentResponseEl.textContent = currentResponse;
+}
+
+function endResponse(timedOut) {
+  if (timedOut) appendChunk('\n[Response timed out after 45s]');
+  setStatus('ready');
+  micBtn.disabled = false;
+  if (currentResponse && window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(currentResponse);
+    window.speechSynthesis.speak(u);
+  }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Speech recognition ───────────────────────────────────────────────────────
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition, interimEl;
+
+if (SpeechRec) {
+  recognition = new SpeechRec();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.lang = 'en-US';
+
+  recognition.onstart = () => {
+    setStatus('listening');
+    micBtn.classList.add('listening');
+    micBtn.textContent = 'Listening…';
+  };
+
+  recognition.onresult = (e) => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    if (!interimEl) {
+      interimEl = document.createElement('div');
+      interimEl.className = 'interim-text';
+      content.appendChild(interimEl);
+    }
+    interimEl.textContent = transcript;
+    if (e.results[e.results.length - 1].isFinal) {
+      if (interimEl) { interimEl.remove(); interimEl = null; }
+      sendCommand(transcript.trim());
+    }
+  };
+
+  recognition.onend = () => {
+    micBtn.classList.remove('listening');
+    micBtn.textContent = 'Hold to talk';
+    if (statusEl.textContent === 'listening') setStatus('ready');
+  };
+
+  recognition.onerror = (e) => {
+    micBtn.classList.remove('listening');
+    micBtn.textContent = 'Hold to talk';
+    setStatus('error', e.error);
+  };
+} else {
+  micBtn.textContent = 'Speech not supported in this browser';
+}
+
+// ── Send command ─────────────────────────────────────────────────────────────
+function sendCommand(text) {
+  if (!text) return;
+  const pane = paneSelect.value;
+  if (!pane) { setStatus('error', 'no pane selected'); return; }
+  window.speechSynthesis?.cancel();
+  startExchange(text);
+  setStatus('processing');
+  micBtn.disabled = true;
+  ws.send(JSON.stringify({ text, pane }));
+}
+
+// ── Mic button ───────────────────────────────────────────────────────────────
+function startListening(e) {
+  e.preventDefault();
+  if (micBtn.disabled || !recognition) return;
+  window.speechSynthesis?.cancel();
+  try { recognition.start(); } catch {}
+}
+function stopListening(e) {
+  e.preventDefault();
+  try { recognition.stop(); } catch {}
+}
+
+micBtn.addEventListener('mousedown',  startListening);
+micBtn.addEventListener('touchstart', startListening, { passive: false });
+micBtn.addEventListener('mouseup',    stopListening);
+micBtn.addEventListener('touchend',   stopListening,  { passive: false });
+
+connect();
+</script>
+</body>
+</html>"""
 
 # ── HTTP + WebSocket handlers ─────────────────────────────────────────────────
 
