@@ -413,6 +413,13 @@ async def ws_handler(websocket) -> None:
             except asyncio.CancelledError:
                 pass
 
+        # Allowlist check: pane must be in the current pane list
+        valid_panes = await get_panes(PROJECTS)
+        valid_ids = {p["id"] for p in valid_panes}
+        if pane not in valid_ids:
+            await websocket.send(json.dumps({"error": f"Pane not found: {pane}"}))
+            return
+
         try:
             before_count = await snapshot_pane(pane)
         except Exception:
@@ -426,28 +433,46 @@ async def ws_handler(websocket) -> None:
 
         async def stream() -> None:
             timed_out = False
-            async for chunk in capture_response(pane, before_count):
-                if chunk is None:
-                    timed_out = True
-                    break
-                await websocket.send(json.dumps({"chunk": chunk}))
-            await websocket.send(json.dumps({"done": True, "timeout": timed_out}))
+            cancelled = False
+            try:
+                async for chunk in capture_response(pane, before_count):
+                    if chunk is None:
+                        timed_out = True
+                        break
+                    await websocket.send(json.dumps({"chunk": chunk}))
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                if not cancelled:
+                    try:
+                        await websocket.send(json.dumps({"done": True, "timeout": timed_out}))
+                    except Exception:
+                        pass
 
         capture_task = asyncio.create_task(stream())
 
-    async for message in websocket:
-        try:
-            data = json.loads(message)
-            text = data.get("text", "").strip()
-            pane = data.get("pane", "").strip()
-            if not text or not pane:
-                await websocket.send(json.dumps({"error": "Missing text or pane"}))
-                continue
-            await run_command(text, pane)
-        except json.JSONDecodeError:
-            await websocket.send(json.dumps({"error": "Invalid JSON"}))
-        except Exception as e:
-            await websocket.send(json.dumps({"error": str(e)}))
+    try:
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                text = data.get("text", "").strip()
+                pane = data.get("pane", "").strip()
+                if not text or not pane:
+                    await websocket.send(json.dumps({"error": "Missing text or pane"}))
+                    continue
+                await run_command(text, pane)
+            except json.JSONDecodeError:
+                await websocket.send(json.dumps({"error": "Invalid JSON"}))
+            except Exception as e:
+                await websocket.send(json.dumps({"error": str(e)}))
+    finally:
+        if capture_task and not capture_task.done():
+            capture_task.cancel()
+            try:
+                await capture_task
+            except asyncio.CancelledError:
+                pass
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
