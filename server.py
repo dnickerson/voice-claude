@@ -86,7 +86,43 @@ async def get_panes(projects: list) -> list:
         return []
 
 # ── Response capture ──────────────────────────────────────────────────────────
-# (added in Task 3)
+
+async def _capture_pane_lines(pane_id: str) -> list:
+    proc = await asyncio.create_subprocess_exec(
+        "tmux", "capture-pane", "-t", pane_id, "-p", "-S", "-2000",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    return stdout.decode().splitlines()
+
+
+async def snapshot_pane(pane_id: str) -> int:
+    lines = await _capture_pane_lines(pane_id)
+    return len(lines)
+
+
+def diff_output(before_count: int, after_lines: list) -> str:
+    new_lines = after_lines[before_count:]
+    return "\n".join(new_lines) if new_lines else ""
+
+
+async def capture_response(pane_id: str, before_count: int):
+    sent_count = before_count
+    no_change_ticks = 0
+    for _ in range(90):  # 45-second ceiling
+        await asyncio.sleep(0.5)
+        lines = await _capture_pane_lines(pane_id)
+        chunk = diff_output(sent_count, lines)
+        if chunk:
+            sent_count = len(lines)
+            no_change_ticks = 0
+            yield chunk
+        else:
+            no_change_ticks += 1
+            if no_change_ticks >= 3:
+                return
+    yield None  # timeout sentinel
 
 # ── HTML UI ───────────────────────────────────────────────────────────────────
 # (added in Task 6)
