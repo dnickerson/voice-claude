@@ -70,7 +70,7 @@ The `label` field is derived by matching `pane_current_path` against the known p
 | sharedlens | `~/sharedlens` |
 | engine | `~/engine_analysis` |
 | hypertherm | `~/hypertherm-project` |
-| home | `~/` |
+| home | `~` |
 
 If no match, the label falls back to the last path segment.
 
