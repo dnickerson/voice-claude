@@ -1,0 +1,11 @@
+[Unit]
+Description=Voice-Claude server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/dananickerson/voice-claude/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
