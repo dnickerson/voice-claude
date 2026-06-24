@@ -2,6 +2,7 @@
 import asyncio
 import http
 import json
+import ssl
 import sys
 from pathlib import Path
 
@@ -28,6 +29,9 @@ def expand_paths(config: dict) -> dict:
     home = str(Path.home())
     for project in config["projects"]:
         project["path"] = project["path"].replace("~", home, 1)
+    for key in ("tls_cert", "tls_key"):
+        if key in config:
+            config[key] = config[key].replace("~", home, 1)
     return config
 
 
@@ -176,6 +180,8 @@ body { font-family: system-ui, -apple-system, sans-serif; background: #111; colo
 .claude-label { font-size: 12px; color: #60a5fa; margin-bottom: 6px; }
 .claude-text { font-size: 15px; line-height: 1.65; white-space: pre-wrap; color: #e5e7eb; }
 .interim-text { font-size: 15px; color: #4b5563; font-style: italic; margin-top: 8px; }
+.sys-msg { font-size: 13px; color: #fb923c; background: #1c1009; border: 1px solid #78350f;
+           border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; line-height: 1.5; }
 
 #bottombar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
@@ -314,7 +320,21 @@ function escHtml(s) {
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition, interimEl;
 
-if (SpeechRec) {
+function showSysMsg(text) {
+  const el = document.createElement('div');
+  el.className = 'sys-msg';
+  el.textContent = text;
+  content.insertBefore(el, content.firstChild);
+}
+
+if (!SpeechRec) {
+  micBtn.textContent = 'Speech not supported';
+  showSysMsg('⚠️ Your browser does not support the Web Speech API. Use Chrome or Safari.');
+} else if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+  micBtn.textContent = 'HTTPS required';
+  micBtn.disabled = true;
+  showSysMsg('⚠️ Voice recognition requires HTTPS. Chrome blocks the microphone on plain http:// pages. Connect via Tailscale HTTPS or set up TLS on this server.');
+} else {
   recognition = new SpeechRec();
   recognition.continuous = false;
   recognition.interimResults = true;
@@ -350,9 +370,15 @@ if (SpeechRec) {
     micBtn.classList.remove('listening');
     micBtn.textContent = 'Hold to talk';
     setStatus('error', e.error);
+    const msgs = {
+      'not-allowed':        '⚠️ Microphone access denied. Allow microphone permission in your browser settings.',
+      'service-not-allowed':'⚠️ Speech blocked — Chrome requires HTTPS for microphone access on non-localhost. Use Tailscale HTTPS.',
+      'network':            '⚠️ Speech recognition network error. Check your internet connection (Chrome needs Google servers).',
+      'no-speech':          null,
+    };
+    const msg = msgs[e.error] ?? `⚠️ Speech error: ${e.error}`;
+    if (msg) showSysMsg(msg);
   };
-} else {
-  micBtn.textContent = 'Speech not supported in this browser';
 }
 
 // ── Send command ─────────────────────────────────────────────────────────────
@@ -372,7 +398,9 @@ function startListening(e) {
   e.preventDefault();
   if (micBtn.disabled || !recognition) return;
   window.speechSynthesis?.cancel();
-  try { recognition.start(); } catch {}
+  try { recognition.start(); } catch(err) {
+    if (!err.message?.includes('already started')) console.error('recognition.start:', err);
+  }
 }
 function stopListening(e) {
   e.preventDefault();
@@ -493,9 +521,15 @@ async def main() -> None:
     global PROJECTS
     PROJECTS = config["projects"]
     port = config["port"]
-    print(f"Voice-Claude on http://0.0.0.0:{port}")
+    ssl_context = None
+    if "tls_cert" in config and "tls_key" in config:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(config["tls_cert"], config["tls_key"])
+        print(f"Voice-Claude on https://0.0.0.0:{port}")
+    else:
+        print(f"Voice-Claude on http://0.0.0.0:{port}")
     stop = asyncio.get_running_loop().create_future()
-    async with serve(ws_handler, "0.0.0.0", port, process_request=process_request):
+    async with serve(ws_handler, "0.0.0.0", port, ssl=ssl_context, process_request=process_request):
         await stop
 
 
