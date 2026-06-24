@@ -130,7 +130,37 @@ async def capture_response(pane_id: str, before_count: int):
 HTML = "<html><body>placeholder</body></html>"
 
 # ── HTTP + WebSocket handlers ─────────────────────────────────────────────────
-# (added in Task 4)
+
+PROJECTS: list = []  # populated at startup
+
+
+async def process_request(connection: ServerConnection, request) -> object:
+    if request.path == "/":
+        return connection.respond(http.HTTPStatus.OK, HTML)
+    if request.path == "/panes":
+        panes = await get_panes(PROJECTS)
+        return connection.respond(http.HTTPStatus.OK, json.dumps(panes))
+    return None  # proceed with WebSocket upgrade
+
+
+async def ws_handler(websocket) -> None:
+    await websocket.send(json.dumps({"chunk": "server connected (stub)\n", "done": True}))
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-# (added in Task 4)
+
+async def main() -> None:
+    config = load_config()
+    expand_paths(config)
+    validate_config(config)
+    global PROJECTS
+    PROJECTS = config["projects"]
+    port = config["port"]
+    print(f"Voice-Claude on http://0.0.0.0:{port}")
+    stop = asyncio.get_running_loop().create_future()
+    async with serve(ws_handler, "0.0.0.0", port, process_request=process_request):
+        await stop
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
