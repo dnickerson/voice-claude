@@ -111,42 +111,37 @@ async def snapshot_pane(pane_id: str) -> str:
     return "\n".join(lines)
 
 
-# Matches a bare ❯ prompt line (Claude Code input prompt = done signal).
-_DONE_PROMPT = re.compile(r'\n❯\s*(?:\n|$)')
-# Lines that are pure separators (──────, ━━━━, etc.) to strip from response.
-_SEPARATOR = re.compile(r'^[─━═\-─]+$')
-
-
-def _extract_response(pane_text: str, command: str) -> tuple[str, bool]:
+def _extract_response(pane_text: str, command: str) -> str:
     """
-    Find command in pane_text and extract the response that follows it.
-    Returns (response_text, done) where done=True when the next ❯ prompt appeared.
+    Find command marker in pane text and return Claude's response.
 
-    Claude Code's TUI structure after a command:
+    Trims at the terminal input area (long ─ separator + ❯ prompt, 50+ chars)
+    to exclude Claude Code's UI chrome.  Short ─ sequences inside the response
+    (markdown rules, table borders) are preserved.
+
+    Claude Code TUI layout after a command:
         ❯ <command>
-        ● <response text...>
-        ──────────────────────
-        ❯                       ← this bare ❯ means Claude is done
-        ──────────────────────
+        ● <response…>
+        ─────────────────── (50+ chars, full terminal width)
+        ❯                   (input area — always present, not a reliable done signal)
+        ───────────────────
         <status bar>
     """
     marker = f"❯ {command}"
     pos = pane_text.find(marker)
     if pos == -1:
-        return "", False
+        return ""
 
     after = pane_text[pos + len(marker):]
 
-    done_match = _DONE_PROMPT.search(after)
-    if done_match:
-        raw = after[:done_match.start()]
-        done = True
-    else:
-        raw = after
-        done = False
+    # Trim at the terminal input area separator (long ─ line before ❯ prompt).
+    # 50-char threshold distinguishes full-width terminal separators from
+    # shorter content separators that may appear inside responses.
+    input_area = re.search(r'\n─{50,}\n❯', after)
+    if input_area:
+        after = after[:input_area.start()]
 
-    lines = [l for l in raw.splitlines() if l.strip() and not _SEPARATOR.match(l.strip())]
-    return "\n".join(lines).strip(), done
+    return after.strip()
 
 
 async def capture_response(pane_id: str, before_text: str, command: str):
@@ -156,17 +151,15 @@ async def capture_response(pane_id: str, before_text: str, command: str):
         await asyncio.sleep(0.5)
         lines = await _capture_pane_lines(pane_id)
         text = "\n".join(lines)
-        response, done = _extract_response(text, command)
+        response = _extract_response(text, command)
         if len(response) > sent_len:
             yield response[sent_len:]
             sent_len = len(response)
             no_change_ticks = 0
         else:
             no_change_ticks += 1
-            if done or no_change_ticks >= 3:
+            if no_change_ticks >= 3:
                 return
-        if done:
-            return
     yield None  # timeout sentinel
 
 # ── HTML UI ───────────────────────────────────────────────────────────────────
