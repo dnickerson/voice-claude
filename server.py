@@ -152,6 +152,10 @@ async def ws_handler(websocket) -> None:
         nonlocal capture_task
         if capture_task and not capture_task.done():
             capture_task.cancel()
+            try:
+                await capture_task
+            except asyncio.CancelledError:
+                pass
 
         try:
             before_count = await snapshot_pane(pane)
