@@ -127,17 +127,21 @@ def _extract_response(pane_text: str, command: str) -> str:
         ───────────────────
         <status bar>
     """
-    marker = f"❯ {command}"
-    pos = pane_text.find(marker)
+    # Claude Code's input area uses a non-breaking space (U+00A0) after ❯,
+    # but the conversation history uses a regular space — search both.
+    for space in (' ', ' '):
+        marker = f"❯{space}{command}"
+        pos = pane_text.find(marker)
+        if pos != -1:
+            break
     if pos == -1:
         return ""
 
     after = pane_text[pos + len(marker):]
 
-    # Trim at the terminal input area separator (long ─ line before ❯ prompt).
-    # 50-char threshold distinguishes full-width terminal separators from
-    # shorter content separators that may appear inside responses.
-    input_area = re.search(r'\n─{50,}\n❯', after)
+    # Trim at the terminal input area: a long ─ separator (50+ chars) followed
+    # by ❯ (with optional trailing whitespace / NBSP on the separator line).
+    input_area = re.search(r'\n─{50,}[ ─]*\n❯', after)
     if input_area:
         after = after[:input_area.start()]
 
@@ -158,7 +162,7 @@ async def capture_response(pane_id: str, before_text: str, command: str):
             no_change_ticks = 0
         else:
             no_change_ticks += 1
-            if no_change_ticks >= 3:
+            if no_change_ticks >= 8:  # 4s of no new output = done
                 return
     yield None  # timeout sentinel
 
