@@ -93,7 +93,9 @@ async def _capture_pane_lines(pane_id: str) -> list:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate()
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.decode().strip() or f"tmux capture-pane failed for {pane_id}")
     return stdout.decode().splitlines()
 
 
@@ -144,7 +146,48 @@ async def process_request(connection: ServerConnection, request) -> object:
 
 
 async def ws_handler(websocket) -> None:
-    await websocket.send(json.dumps({"chunk": "server connected (stub)\n", "done": True}))
+    capture_task = None
+
+    async def run_command(text: str, pane: str) -> None:
+        nonlocal capture_task
+        if capture_task and not capture_task.done():
+            capture_task.cancel()
+
+        try:
+            before_count = await snapshot_pane(pane)
+        except Exception:
+            await websocket.send(json.dumps({"error": f"Pane not found: {pane}"}))
+            return
+
+        inject = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-t", pane, text, "Enter",
+        )
+        await inject.wait()
+
+        async def stream() -> None:
+            timed_out = False
+            async for chunk in capture_response(pane, before_count):
+                if chunk is None:
+                    timed_out = True
+                    break
+                await websocket.send(json.dumps({"chunk": chunk}))
+            await websocket.send(json.dumps({"done": True, "timeout": timed_out}))
+
+        capture_task = asyncio.create_task(stream())
+
+    async for message in websocket:
+        try:
+            data = json.loads(message)
+            text = data.get("text", "").strip()
+            pane = data.get("pane", "").strip()
+            if not text or not pane:
+                await websocket.send(json.dumps({"error": "Missing text or pane"}))
+                continue
+            await run_command(text, pane)
+        except json.JSONDecodeError:
+            await websocket.send(json.dumps({"error": "Invalid JSON"}))
+        except Exception as e:
+            await websocket.send(json.dumps({"error": str(e)}))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
