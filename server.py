@@ -418,10 +418,16 @@ async def ws_handler(websocket) -> None:
             await websocket.send(json.dumps({"error": f"Pane not found: {pane}"}))
             return
 
-        inject = await asyncio.create_subprocess_exec(
-            "tmux", "send-keys", "-t", pane, text, "Enter",
+        # Send text with -l (literal) so special characters aren't parsed as
+        # key names, then send Enter in a separate call so it's always received.
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-l", "-t", pane, text,
         )
-        await inject.wait()
+        await proc.wait()
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", "send-keys", "-t", pane, "Enter",
+        )
+        await proc.wait()
 
         async def stream() -> None:
             timed_out = False
