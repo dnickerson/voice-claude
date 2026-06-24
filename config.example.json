@@ -1,0 +1,11 @@
+{
+  "port": 8899,
+  "projects": [
+    {"label": "flytab",     "path": "~/flytab"},
+    {"label": "knitfit",    "path": "~/knitfit/platform"},
+    {"label": "sharedlens", "path": "~/sharedlens"},
+    {"label": "engine",     "path": "~/engine_analysis"},
+    {"label": "hypertherm", "path": "~/hypertherm-project"},
+    {"label": "home",       "path": "~"}
+  ]
+}
