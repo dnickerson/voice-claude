@@ -1,20 +1,74 @@
-from server import diff_output
+from server import _extract_response
 
 
-def test_diff_output_new_lines():
-    before_count = 5
-    after_lines = ["a", "b", "c", "d", "e", "new1", "new2"]
-    assert diff_output(before_count, after_lines) == "new1\nnew2"
+def _pane(lines: list[str]) -> str:
+    return "\n".join(lines)
 
 
-def test_diff_output_no_change():
-    assert diff_output(5, ["a", "b", "c", "d", "e"]) == ""
+def test_extract_response_basic():
+    text = _pane([
+        "❯ say hello",
+        "",
+        "● Hello!",
+        "──────────────────────────────────",
+        "❯ ",
+        "──────────────────────────────────",
+        "  status bar",
+    ])
+    response, done = _extract_response(text, "say hello")
+    assert "Hello!" in response
+    assert done is True
 
 
-def test_diff_output_empty_before():
-    assert diff_output(0, ["line1", "line2"]) == "line1\nline2"
+def test_extract_response_still_streaming():
+    # No bare ❯ prompt yet — Claude still responding
+    text = _pane([
+        "❯ explain recursion",
+        "",
+        "● Recursion is when a function calls itself.",
+        "  More detail coming…",
+    ])
+    response, done = _extract_response(text, "explain recursion")
+    assert "Recursion" in response
+    assert done is False
 
 
-def test_diff_output_fewer_lines_than_before():
-    # pane was cleared; return empty rather than negative slice
-    assert diff_output(10, ["a", "b"]) == ""
+def test_extract_response_command_not_yet_visible():
+    text = _pane([
+        "● some previous response",
+        "❯ ",
+    ])
+    response, done = _extract_response(text, "new command")
+    assert response == ""
+    assert done is False
+
+
+def test_extract_response_strips_separators():
+    text = _pane([
+        "❯ test",
+        "──────────────────────────────",
+        "● Result here",
+        "──────────────────────────────",
+        "❯ ",
+    ])
+    response, done = _extract_response(text, "test")
+    assert "──" not in response
+    assert "Result here" in response
+    assert done is True
+
+
+def test_extract_response_multiline():
+    text = _pane([
+        "❯ list three things",
+        "",
+        "● 1. Apples",
+        "  2. Bananas",
+        "  3. Cherries",
+        "──────────────────────────────",
+        "❯ ",
+    ])
+    response, done = _extract_response(text, "list three things")
+    assert "Apples" in response
+    assert "Bananas" in response
+    assert "Cherries" in response
+    assert done is True

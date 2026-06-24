@@ -2,6 +2,7 @@
 import asyncio
 import http
 import json
+import re
 import ssl
 import sys
 from pathlib import Path
@@ -105,31 +106,67 @@ async def _capture_pane_lines(pane_id: str) -> list:
     return stdout.decode().splitlines()
 
 
-async def snapshot_pane(pane_id: str) -> int:
+async def snapshot_pane(pane_id: str) -> str:
     lines = await _capture_pane_lines(pane_id)
-    return len(lines)
+    return "\n".join(lines)
 
 
-def diff_output(before_count: int, after_lines: list) -> str:
-    new_lines = after_lines[before_count:]
-    return "\n".join(new_lines) if new_lines else ""
+# Matches a bare ❯ prompt line (Claude Code input prompt = done signal).
+_DONE_PROMPT = re.compile(r'\n❯\s*(?:\n|$)')
+# Lines that are pure separators (──────, ━━━━, etc.) to strip from response.
+_SEPARATOR = re.compile(r'^[─━═\-─]+$')
 
 
-async def capture_response(pane_id: str, before_count: int):
-    sent_count = before_count
+def _extract_response(pane_text: str, command: str) -> tuple[str, bool]:
+    """
+    Find command in pane_text and extract the response that follows it.
+    Returns (response_text, done) where done=True when the next ❯ prompt appeared.
+
+    Claude Code's TUI structure after a command:
+        ❯ <command>
+        ● <response text...>
+        ──────────────────────
+        ❯                       ← this bare ❯ means Claude is done
+        ──────────────────────
+        <status bar>
+    """
+    marker = f"❯ {command}"
+    pos = pane_text.find(marker)
+    if pos == -1:
+        return "", False
+
+    after = pane_text[pos + len(marker):]
+
+    done_match = _DONE_PROMPT.search(after)
+    if done_match:
+        raw = after[:done_match.start()]
+        done = True
+    else:
+        raw = after
+        done = False
+
+    lines = [l for l in raw.splitlines() if l.strip() and not _SEPARATOR.match(l.strip())]
+    return "\n".join(lines).strip(), done
+
+
+async def capture_response(pane_id: str, before_text: str, command: str):
+    sent_len = 0
     no_change_ticks = 0
     for _ in range(90):  # 45-second ceiling
         await asyncio.sleep(0.5)
         lines = await _capture_pane_lines(pane_id)
-        chunk = diff_output(sent_count, lines)
-        if chunk:
-            sent_count = len(lines)
+        text = "\n".join(lines)
+        response, done = _extract_response(text, command)
+        if len(response) > sent_len:
+            yield response[sent_len:]
+            sent_len = len(response)
             no_change_ticks = 0
-            yield chunk
         else:
             no_change_ticks += 1
-            if no_change_ticks >= 3:
+            if done or no_change_ticks >= 3:
                 return
+        if done:
+            return
     yield None  # timeout sentinel
 
 # ── HTML UI ───────────────────────────────────────────────────────────────────
@@ -236,7 +273,8 @@ let ws, currentResponseEl, currentResponse = '';
 function connect() {
   setStatus('connecting');
   micBtn.disabled = true;
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${wsProto}//${location.host}/ws`);
 
   ws.onopen = () => {
     setStatus('ready');
@@ -458,7 +496,7 @@ async def ws_handler(websocket) -> None:
             return
 
         try:
-            before_count = await snapshot_pane(pane)
+            before_text = await snapshot_pane(pane)
         except Exception:
             await websocket.send(json.dumps({"error": f"Pane not found: {pane}"}))
             return
@@ -472,7 +510,7 @@ async def ws_handler(websocket) -> None:
             timed_out = False
             cancelled = False
             try:
-                async for chunk in capture_response(pane, before_count):
+                async for chunk in capture_response(pane, before_text, text):
                     if chunk is None:
                         timed_out = True
                         break
