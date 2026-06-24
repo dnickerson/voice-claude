@@ -195,39 +195,39 @@ body { font-family: system-ui, -apple-system, sans-serif; background: #111; colo
 }
 .s-connecting { background: #333; color: #888; }
 .s-ready      { background: #14532d; color: #4ade80; }
-.s-listening  { background: #1e3a5f; color: #60a5fa; }
 .s-processing { background: #451a03; color: #fb923c; }
 .s-error      { background: #450a0a; color: #f87171; }
 
 #content {
-  padding: 70px 16px 90px;
+  padding: 70px 16px 100px;
   min-height: 100vh;
   touch-action: pan-y;
 }
 .exchange { margin-bottom: 28px; border-top: 1px solid #222; padding-top: 16px; }
-.you-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
-.you-text { font-size: 15px; color: #9ca3af; margin-bottom: 12px; font-style: italic; }
+.you-label  { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.you-text   { font-size: 15px; color: #9ca3af; margin-bottom: 12px; font-style: italic; }
 .claude-label { font-size: 12px; color: #60a5fa; margin-bottom: 6px; }
-.claude-text { font-size: 15px; line-height: 1.65; white-space: pre-wrap; color: #e5e7eb; }
-.interim-text { font-size: 15px; color: #4b5563; font-style: italic; margin-top: 8px; }
-.sys-msg { font-size: 13px; color: #fb923c; background: #1c1009; border: 1px solid #78350f;
-           border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; line-height: 1.5; }
+.claude-text  { font-size: 15px; line-height: 1.65; white-space: pre-wrap; color: #e5e7eb; }
 
 #bottombar {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
   background: #1e1e1e; border-top: 1px solid #333;
-  padding: 10px 16px;
+  padding: 10px 12px;
 }
-#mic-btn {
-  display: block; width: 100%; max-width: 480px; margin: 0 auto;
-  background: #1d4ed8; color: #fff; border: none; border-radius: 50px;
-  padding: 18px 32px; font-size: 17px; font-weight: 600;
-  cursor: pointer; user-select: none; -webkit-user-select: none;
-  touch-action: none;
-  transition: background 0.15s;
+#input-row { display: flex; gap: 8px; align-items: flex-end; }
+#text-input {
+  flex: 1; background: #2a2a2a; color: #e0e0e0;
+  border: 1px solid #444; border-radius: 12px;
+  padding: 12px 14px; font-size: 16px; font-family: inherit;
+  line-height: 1.4; resize: none; overflow-y: auto;
+  max-height: 120px;
 }
-#mic-btn.listening  { background: #b91c1c; }
-#mic-btn:disabled   { background: #1f2937; color: #4b5563; cursor: not-allowed; }
+#text-input:focus { outline: none; border-color: #3b82f6; }
+#send-btn {
+  background: #1d4ed8; color: #fff; border: none; border-radius: 12px;
+  padding: 12px 20px; font-size: 16px; font-weight: 600; cursor: pointer;
+}
+#send-btn:disabled { background: #1f2937; color: #4b5563; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -240,45 +240,40 @@ body { font-family: system-ui, -apple-system, sans-serif; background: #111; colo
 
 <div id="content">
   <div style="padding:16px 0; color:#4b5563; font-size:14px;">
-    Select a pane above and hold the button below to speak.
+    Select a pane above, then type or dictate below and tap Send.
   </div>
 </div>
 
 <div id="bottombar">
-  <button id="mic-btn" disabled>Hold to talk</button>
+  <div id="input-row">
+    <textarea id="text-input" rows="1" placeholder="Type or use keyboard mic…" disabled></textarea>
+    <button id="send-btn" disabled>Send</button>
+  </div>
 </div>
 
 <script>
 const content    = document.getElementById('content');
 const paneSelect = document.getElementById('pane-select');
 const statusEl   = document.getElementById('status');
-const micBtn     = document.getElementById('mic-btn');
+const textInput  = document.getElementById('text-input');
+const sendBtn    = document.getElementById('send-btn');
 
-// ── Status ──────────────────────────────────────────────────────────────────
+// ── Status ───────────────────────────────────────────────────────────────────
 function setStatus(s, label) {
   statusEl.className = `s-${s}`;
   statusEl.textContent = label || s;
 }
 
-// ── WebSocket ────────────────────────────────────────────────────────────────
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws, currentResponseEl, currentResponse = '';
 
 function connect() {
   setStatus('connecting');
-  micBtn.disabled = true;
+  setInputEnabled(false);
   const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${wsProto}//${location.host}/ws`);
-
-  ws.onopen = () => {
-    setStatus('ready');
-    micBtn.disabled = false;
-    loadPanes();
-  };
-  ws.onclose = () => {
-    setStatus('error', 'disconnected');
-    micBtn.disabled = true;
-    setTimeout(connect, 3000);
-  };
+  ws.onopen = () => { setStatus('ready'); setInputEnabled(true); loadPanes(); };
+  ws.onclose = () => { setStatus('error', 'disconnected'); setInputEnabled(false); setTimeout(connect, 3000); };
   ws.onerror = () => setStatus('error');
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
@@ -293,37 +288,42 @@ function connect() {
   };
 }
 
-// ── Pane picker ──────────────────────────────────────────────────────────────
+function setInputEnabled(on) {
+  textInput.disabled = !on;
+  sendBtn.disabled   = !on;
+}
+
+// ── Pane picker ───────────────────────────────────────────────────────────────
 async function loadPanes() {
   try {
-    const r = await fetch('/panes');
-    const panes = await r.json();
-    if (!panes.length) {
-      paneSelect.innerHTML = '<option value="">No panes found — start tmux + claude</option>';
-      return;
-    }
-    paneSelect.innerHTML = panes.map(p =>
-      `<option value="${p.id}">[${p.label}] ${p.id} · ${p.command}</option>`
-    ).join('');
+    const panes = await fetch('/panes').then(r => r.json());
+    paneSelect.innerHTML = panes.length
+      ? panes.map(p => `<option value="${p.id}">[${p.label}] ${p.id} · ${p.command}</option>`).join('')
+      : '<option value="">No panes found — start tmux + claude</option>';
   } catch {
     paneSelect.innerHTML = '<option value="">Error loading panes</option>';
   }
 }
 document.getElementById('refresh-btn').onclick = loadPanes;
 
-// ── Content ──────────────────────────────────────────────────────────────────
+// ── Content ───────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+           .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 function startExchange(text) {
   currentResponse = '';
   const ex = document.createElement('div');
   ex.className = 'exchange';
   ex.innerHTML = `
-    <div class="you-label">You said</div>
+    <div class="you-label">You</div>
     <div class="you-text">${escHtml(text)}</div>
     <div class="claude-label">Claude</div>
-    <div class="claude-text"></div>
-  `;
+    <div class="claude-text"></div>`;
   content.appendChild(ex);
   currentResponseEl = ex.querySelector('.claude-text');
+  ex.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function appendChunk(chunk) {
@@ -332,116 +332,36 @@ function appendChunk(chunk) {
 }
 
 function endResponse(timedOut) {
-  if (timedOut) appendChunk('\n[Response timed out after 45s]');
+  if (timedOut) appendChunk('\n[timed out after 45s]');
   setStatus('ready');
-  micBtn.disabled = false;
-  if (currentResponse && window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(currentResponse);
-    window.speechSynthesis.speak(u);
-  }
+  setInputEnabled(true);
+  textInput.focus();
 }
 
-function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-           .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
-
-// ── Speech recognition ───────────────────────────────────────────────────────
-const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition, interimEl;
-
-function showSysMsg(text) {
-  const el = document.createElement('div');
-  el.className = 'sys-msg';
-  el.textContent = text;
-  content.insertBefore(el, content.firstChild);
-}
-
-if (!SpeechRec) {
-  micBtn.textContent = 'Speech not supported';
-  showSysMsg('⚠️ Your browser does not support the Web Speech API. Use Chrome or Safari.');
-} else if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-  micBtn.textContent = 'HTTPS required';
-  micBtn.disabled = true;
-  showSysMsg('⚠️ Voice recognition requires HTTPS. Chrome blocks the microphone on plain http:// pages. Connect via Tailscale HTTPS or set up TLS on this server.');
-} else {
-  recognition = new SpeechRec();
-  recognition.continuous = false;
-  recognition.interimResults = true;
-  recognition.lang = 'en-US';
-
-  recognition.onstart = () => {
-    setStatus('listening');
-    micBtn.classList.add('listening');
-    micBtn.textContent = 'Listening…';
-  };
-
-  recognition.onresult = (e) => {
-    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
-    if (!interimEl) {
-      interimEl = document.createElement('div');
-      interimEl.className = 'interim-text';
-      content.appendChild(interimEl);
-    }
-    interimEl.textContent = transcript;
-    if (e.results[e.results.length - 1].isFinal) {
-      if (interimEl) { interimEl.remove(); interimEl = null; }
-      sendCommand(transcript.trim());
-    }
-  };
-
-  recognition.onend = () => {
-    micBtn.classList.remove('listening');
-    micBtn.textContent = 'Hold to talk';
-    if (statusEl.textContent === 'listening') setStatus('ready');
-  };
-
-  recognition.onerror = (e) => {
-    micBtn.classList.remove('listening');
-    micBtn.textContent = 'Hold to talk';
-    setStatus('error', e.error);
-    const msgs = {
-      'not-allowed':        '⚠️ Microphone access denied. Allow microphone permission in your browser settings.',
-      'service-not-allowed':'⚠️ Speech blocked — Chrome requires HTTPS for microphone access on non-localhost. Use Tailscale HTTPS.',
-      'network':            '⚠️ Speech recognition network error. Check your internet connection (Chrome needs Google servers).',
-      'no-speech':          null,
-    };
-    const msg = msgs[e.error] ?? `⚠️ Speech error: ${e.error}`;
-    if (msg) showSysMsg(msg);
-  };
-}
-
-// ── Send command ─────────────────────────────────────────────────────────────
-function sendCommand(text) {
+// ── Send ──────────────────────────────────────────────────────────────────────
+function sendCommand() {
+  const text = textInput.value.trim();
   if (!text) return;
   const pane = paneSelect.value;
   if (!pane) { setStatus('error', 'no pane selected'); return; }
-  window.speechSynthesis?.cancel();
+  textInput.value = '';
+  textInput.style.height = '';
   startExchange(text);
   setStatus('processing');
-  micBtn.disabled = true;
+  setInputEnabled(false);
   ws.send(JSON.stringify({ text, pane }));
 }
 
-// ── Mic button ───────────────────────────────────────────────────────────────
-function startListening(e) {
-  e.preventDefault();
-  if (micBtn.disabled || !recognition) return;
-  window.speechSynthesis?.cancel();
-  try { recognition.start(); } catch(err) {
-    if (!err.message?.includes('already started')) console.error('recognition.start:', err);
-  }
-}
-function stopListening(e) {
-  e.preventDefault();
-  try { recognition.stop(); } catch {}
-}
+sendBtn.addEventListener('click', sendCommand);
+textInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCommand(); }
+});
 
-micBtn.addEventListener('mousedown',  startListening);
-micBtn.addEventListener('touchstart', startListening, { passive: false });
-micBtn.addEventListener('mouseup',    stopListening);
-micBtn.addEventListener('touchend',   stopListening,  { passive: false });
+// Auto-grow textarea up to max-height
+textInput.addEventListener('input', () => {
+  textInput.style.height = '';
+  textInput.style.height = Math.min(textInput.scrollHeight, 120) + 'px';
+});
 
 connect();
 </script>
