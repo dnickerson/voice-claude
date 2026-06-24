@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from websockets.asyncio.server import serve, ServerConnection
+from websockets.http11 import Response
+from websockets.datastructures import Headers
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -392,12 +394,19 @@ connect();
 PROJECTS: list = []  # populated at startup
 
 
+def _response(content_type: str, body: bytes) -> Response:
+    return Response(200, "OK", Headers([
+        ("Content-Type", content_type),
+        ("Content-Length", str(len(body))),
+    ]), body)
+
+
 async def process_request(connection: ServerConnection, request) -> object:
     if request.path == "/":
-        return connection.respond(http.HTTPStatus.OK, HTML)
+        return _response("text/html; charset=utf-8", HTML.encode("utf-8"))
     if request.path == "/panes":
         panes = await get_panes(PROJECTS)
-        return connection.respond(http.HTTPStatus.OK, json.dumps(panes))
+        return _response("application/json", json.dumps(panes).encode("utf-8"))
     return None  # proceed with WebSocket upgrade
 
 
