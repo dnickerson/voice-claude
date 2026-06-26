@@ -410,6 +410,7 @@ connect();
 PROJECTS: list = []  # populated at startup
 TOKEN: str = ""      # set at startup
 PORT: int = 0        # set at startup; used by origin check
+HOSTNAME: str = ""   # set at startup; added to allowed WebSocket origins
 RATE_LIMIT_SECONDS: float = 1.0
 
 
@@ -447,6 +448,9 @@ def _check_origin(request) -> bool:
         f"http://127.0.0.1:{PORT}",
         f"https://127.0.0.1:{PORT}",
     }
+    if HOSTNAME and HOSTNAME not in ("localhost", "127.0.0.1", "0.0.0.0"):
+        allowed.add(f"http://{HOSTNAME}:{PORT}")
+        allowed.add(f"https://{HOSTNAME}:{PORT}")
     return origin in allowed
 
 
@@ -466,6 +470,9 @@ def _error_response(status: int, reason: str, message: bytes) -> Response:
 
 async def process_request(connection: ServerConnection, request) -> object:
     path = request.path.split("?")[0]
+
+    if path == "/favicon.ico":
+        return Response(204, "No Content", Headers([("Content-Length", "0")]), b"")
 
     if not _check_token(request):
         return _error_response(401, "Unauthorized", b"Unauthorized")
@@ -579,7 +586,7 @@ async def ws_handler(websocket) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main() -> None:
-    global PROJECTS, TOKEN, PORT
+    global PROJECTS, TOKEN, PORT, HOSTNAME
     config = load_config()
     expand_paths(config)
     validate_config(config)
@@ -587,7 +594,7 @@ async def main() -> None:
     PORT = config["port"]
     TOKEN = config.get("token") or secrets.token_urlsafe(24)
     bind = config.get("bind", "127.0.0.1")
-    hostname = config.get("hostname") or bind
+    HOSTNAME = config.get("hostname") or bind
 
     ssl_context = None
     if "tls_cert" in config and "tls_key" in config:
@@ -603,7 +610,7 @@ async def main() -> None:
         )
         proto = "http"
 
-    print(f"Voice-Claude: {proto}://{hostname}:{PORT}/?token={TOKEN}", flush=True)
+    print(f"Voice-Claude: {proto}://{HOSTNAME}:{PORT}/?token={TOKEN}", flush=True)
     stop = asyncio.get_running_loop().create_future()
     async with serve(ws_handler, bind, PORT, ssl=ssl_context, process_request=process_request):
         await stop
