@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import asyncio
-import http
 import json
 import re
+import secrets
 import ssl
 import sys
 from pathlib import Path
@@ -111,6 +111,31 @@ async def snapshot_pane(pane_id: str) -> str:
     return "\n".join(lines)
 
 
+# Claude Code ≥ some version prefixes the input-area separator with ✶ (U+2736).
+# Allow 0–2 arbitrary chars before the 50+ dashes so both ─────… and ✶─────… match.
+_INPUT_AREA_RE = re.compile(r'\n.{0,2}─{50,}[ ─]*\n❯')
+
+
+def _find_input_sep(text: str) -> int:
+    m = _INPUT_AREA_RE.search(text)
+    return m.start() if m else -1
+
+
+def _extract_last_bullet_block(pane_text: str) -> str:
+    """
+    Extract the last ● response block visible above the input area separator.
+
+    Fallback for when the ❯ <command> marker has scrolled off the TUI's
+    alternate-screen buffer (which has no scrollback).
+    """
+    sep = _find_input_sep(pane_text)
+    visible = pane_text[:sep] if sep != -1 else pane_text
+    pos = visible.rfind('\n●')
+    if pos == -1:
+        return ""
+    return visible[pos + 1:].strip()
+
+
 def _extract_response(pane_text: str, command: str) -> str:
     """
     Find command marker in pane text and return Claude's response.
@@ -122,14 +147,12 @@ def _extract_response(pane_text: str, command: str) -> str:
     Claude Code TUI layout after a command:
         ❯ <command>
         ● <response…>
-        ─────────────────── (50+ chars, full terminal width)
-        ❯                   (input area — always present, not a reliable done signal)
-        ───────────────────
-        <status bar>
+        [✶]─────────────────── (50+ chars; ✶ prefix optional in newer Claude Code)
+        ❯                     (input area)
     """
     # Claude Code's input area uses a non-breaking space (U+00A0) after ❯,
     # but the conversation history uses a regular space — search both.
-    for space in (' ', ' '):
+    for space in (' ', '\xa0'):
         marker = f"❯{space}{command}"
         pos = pane_text.find(marker)
         if pos != -1:
@@ -139,16 +162,18 @@ def _extract_response(pane_text: str, command: str) -> str:
 
     after = pane_text[pos + len(marker):]
 
-    # Trim at the terminal input area: a long ─ separator (50+ chars) followed
-    # by ❯ (with optional trailing whitespace / NBSP on the separator line).
-    input_area = re.search(r'\n─{50,}[ ─]*\n❯', after)
-    if input_area:
-        after = after[:input_area.start()]
+    sep = _find_input_sep(after)
+    if sep != -1:
+        after = after[:sep]
 
     return after.strip()
 
 
 async def capture_response(pane_id: str, before_text: str, command: str):
+    # Snapshot the last ● block before the command so the fallback can
+    # distinguish a pre-existing response from the new one.
+    before_bullet = _extract_last_bullet_block(before_text)
+
     sent_len = 0
     no_change_ticks = 0
     for _ in range(90):  # 45-second ceiling
@@ -156,6 +181,14 @@ async def capture_response(pane_id: str, before_text: str, command: str):
         lines = await _capture_pane_lines(pane_id)
         text = "\n".join(lines)
         response = _extract_response(text, command)
+
+        # Fallback: ❯ <command> has scrolled off the TUI's alternate screen.
+        # The last ● block above the input separator IS the current response.
+        if not response:
+            current_bullet = _extract_last_bullet_block(text)
+            if current_bullet and current_bullet != before_bullet:
+                response = current_bullet
+
         if len(response) > sent_len:
             yield response[sent_len:]
             sent_len = len(response)
@@ -167,7 +200,6 @@ async def capture_response(pane_id: str, before_text: str, command: str):
     yield None  # timeout sentinel
 
 # ── HTML UI ───────────────────────────────────────────────────────────────────
-# (added in Task 6)
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -256,6 +288,7 @@ body { font-family: system-ui, -apple-system, sans-serif; background: #111; colo
 </div>
 
 <script>
+const TOKEN    = '__TOKEN__';
 const content    = document.getElementById('content');
 const paneSelect = document.getElementById('pane-select');
 const statusEl   = document.getElementById('status');
@@ -275,7 +308,7 @@ function connect() {
   setStatus('connecting');
   setInputEnabled(false);
   const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${wsProto}//${location.host}/ws`);
+  ws = new WebSocket(`${wsProto}//${location.host}/ws?token=${TOKEN}`);
   ws.onopen = () => { setStatus('ready'); setInputEnabled(true); loadPanes(); };
   ws.onclose = () => { setStatus('error', 'disconnected'); setInputEnabled(false); setTimeout(connect, 3000); };
   ws.onerror = () => setStatus('error');
@@ -300,9 +333,9 @@ function setInputEnabled(on) {
 // ── Pane picker ───────────────────────────────────────────────────────────────
 async function loadPanes() {
   try {
-    const panes = await fetch('/panes').then(r => r.json());
+    const panes = await fetch(`/panes?token=${TOKEN}`).then(r => r.json());
     paneSelect.innerHTML = panes.length
-      ? panes.map(p => `<option value="${p.id}">[${p.label}] ${p.id} · ${p.command}</option>`).join('')
+      ? panes.map(p => `<option value="${escHtml(p.id)}">[${escHtml(p.label)}] ${escHtml(p.id)} · ${escHtml(p.command)}</option>`).join('')
       : '<option value="">No panes found — start tmux + claude</option>';
   } catch {
     paneSelect.innerHTML = '<option value="">Error loading panes</option>';
@@ -375,26 +408,88 @@ connect();
 # ── HTTP + WebSocket handlers ─────────────────────────────────────────────────
 
 PROJECTS: list = []  # populated at startup
+TOKEN: str = ""      # set at startup
+PORT: int = 0        # set at startup; used by origin check
+RATE_LIMIT_SECONDS: float = 1.0
 
 
-def _response(content_type: str, body: bytes) -> Response:
+def _get_query_param(path: str, key: str) -> str:
+    if "?" not in path:
+        return ""
+    query = path.split("?", 1)[1]
+    for param in query.split("&"):
+        if "=" in param:
+            k, v = param.split("=", 1)
+            if k == key:
+                return v
+    return ""
+
+
+def _check_token(request) -> bool:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        candidate = auth[7:]
+    else:
+        candidate = _get_query_param(request.path, "token")
+    if not candidate:
+        return False
+    return secrets.compare_digest(candidate, TOKEN)
+
+
+def _check_origin(request) -> bool:
+    """Allow same-host origins and clients that send no Origin header (curl, CLI)."""
+    origin = request.headers.get("Origin", "")
+    if not origin:
+        return True
+    allowed = {
+        f"http://localhost:{PORT}",
+        f"https://localhost:{PORT}",
+        f"http://127.0.0.1:{PORT}",
+        f"https://127.0.0.1:{PORT}",
+    }
+    return origin in allowed
+
+
+def _http_response(content_type: str, body: bytes) -> Response:
     return Response(200, "OK", Headers([
         ("Content-Type", content_type),
         ("Content-Length", str(len(body))),
     ]), body)
 
 
+def _error_response(status: int, reason: str, message: bytes) -> Response:
+    return Response(status, reason, Headers([
+        ("Content-Type", "text/plain"),
+        ("Content-Length", str(len(message))),
+    ]), message)
+
+
 async def process_request(connection: ServerConnection, request) -> object:
-    if request.path == "/":
-        return _response("text/html; charset=utf-8", HTML.encode("utf-8"))
-    if request.path == "/panes":
+    path = request.path.split("?")[0]
+
+    if not _check_token(request):
+        return _error_response(401, "Unauthorized", b"Unauthorized")
+
+    if path == "/":
+        # token is urlsafe base64 (A-Za-z0-9_-) so injection is not possible
+        html = HTML.replace("'__TOKEN__'", f"'{TOKEN}'")
+        body = html.encode("utf-8")
+        return _http_response("text/html; charset=utf-8", body)
+
+    if path == "/panes":
         panes = await get_panes(PROJECTS)
-        return _response("application/json", json.dumps(panes).encode("utf-8"))
+        return _http_response("application/json", json.dumps(panes).encode("utf-8"))
+
+    # WebSocket upgrade path — reject cross-origin requests
+    if not _check_origin(request):
+        return _error_response(403, "Forbidden", b"Forbidden")
+
     return None  # proceed with WebSocket upgrade
 
 
 async def ws_handler(websocket) -> None:
     capture_task = None
+    last_command_time = 0.0
 
     async def run_command(text: str, pane: str) -> None:
         nonlocal capture_task
@@ -459,11 +554,19 @@ async def ws_handler(websocket) -> None:
                 if not text or not pane:
                     await websocket.send(json.dumps({"error": "Missing text or pane"}))
                     continue
+
+                now = asyncio.get_running_loop().time()
+                if now - last_command_time < RATE_LIMIT_SECONDS:
+                    await websocket.send(json.dumps({"error": "Rate limited — wait before sending another command"}))
+                    continue
+                last_command_time = now
+
                 await run_command(text, pane)
             except json.JSONDecodeError:
                 await websocket.send(json.dumps({"error": "Invalid JSON"}))
             except Exception as e:
-                await websocket.send(json.dumps({"error": str(e)}))
+                print(f"[ERROR] ws_handler: {e}", file=sys.stderr)
+                await websocket.send(json.dumps({"error": "Internal server error"}))
     finally:
         if capture_task and not capture_task.done():
             capture_task.cancel()
@@ -476,21 +579,32 @@ async def ws_handler(websocket) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main() -> None:
+    global PROJECTS, TOKEN, PORT
     config = load_config()
     expand_paths(config)
     validate_config(config)
-    global PROJECTS
     PROJECTS = config["projects"]
-    port = config["port"]
+    PORT = config["port"]
+    TOKEN = config.get("token") or secrets.token_urlsafe(24)
+    bind = config.get("bind", "127.0.0.1")
+
     ssl_context = None
     if "tls_cert" in config and "tls_key" in config:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_context.load_cert_chain(config["tls_cert"], config["tls_key"])
-        print(f"Voice-Claude on https://0.0.0.0:{port}")
+        proto = "https"
     else:
-        print(f"Voice-Claude on http://0.0.0.0:{port}")
+        print(
+            "WARNING: TLS not configured — traffic is unencrypted. "
+            "Add tls_cert and tls_key to config.json to enable HTTPS.",
+            file=sys.stderr,
+        )
+        proto = "http"
+
+    print(f"Voice-Claude: {proto}://{bind}:{PORT}/?token={TOKEN}")
     stop = asyncio.get_running_loop().create_future()
-    async with serve(ws_handler, "0.0.0.0", port, ssl=ssl_context, process_request=process_request):
+    async with serve(ws_handler, bind, PORT, ssl=ssl_context, process_request=process_request):
         await stop
 
 
