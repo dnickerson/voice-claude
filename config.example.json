@@ -1,5 +1,10 @@
 {
   "port": 8899,
+  "bind": "0.0.0.0",
+  "hostname": "your-machine.taild1234.ts.net",
+  "token": "your-secret-token",
+  "tls_cert": "~/.config/voice-claude/voice-claude.crt",
+  "tls_key": "~/.config/voice-claude/voice-claude.key",
   "projects": [
     {"label": "flytab",     "path": "~/flytab"},
     {"label": "knitfit",    "path": "~/knitfit/platform"},

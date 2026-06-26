@@ -587,6 +587,7 @@ async def main() -> None:
     PORT = config["port"]
     TOKEN = config.get("token") or secrets.token_urlsafe(24)
     bind = config.get("bind", "127.0.0.1")
+    hostname = config.get("hostname") or bind
 
     ssl_context = None
     if "tls_cert" in config and "tls_key" in config:
@@ -602,7 +603,7 @@ async def main() -> None:
         )
         proto = "http"
 
-    print(f"Voice-Claude: {proto}://{bind}:{PORT}/?token={TOKEN}", flush=True)
+    print(f"Voice-Claude: {proto}://{hostname}:{PORT}/?token={TOKEN}", flush=True)
     stop = asyncio.get_running_loop().create_future()
     async with serve(ws_handler, bind, PORT, ssl=ssl_context, process_request=process_request):
         await stop
