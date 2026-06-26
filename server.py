@@ -602,7 +602,7 @@ async def main() -> None:
         )
         proto = "http"
 
-    print(f"Voice-Claude: {proto}://{bind}:{PORT}/?token={TOKEN}")
+    print(f"Voice-Claude: {proto}://{bind}:{PORT}/?token={TOKEN}", flush=True)
     stop = asyncio.get_running_loop().create_future()
     async with serve(ws_handler, bind, PORT, ssl=ssl_context, process_request=process_request):
         await stop
